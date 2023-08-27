@@ -121,7 +121,10 @@ func responseAli2OpenAI(response *AliChatResponse) *OpenAITextResponse {
 func streamResponseAli2OpenAI(aliResponse *AliChatResponse) *ChatCompletionsStreamResponse {
 	var choice ChatCompletionsStreamResponseChoice
 	choice.Delta.Content = aliResponse.Output.Text
-	choice.FinishReason = aliResponse.Output.FinishReason
+	if aliResponse.Output.FinishReason != "null" {
+		finishReason := aliResponse.Output.FinishReason
+		choice.FinishReason = &finishReason
+	}
 	response := ChatCompletionsStreamResponse{
 		Id:      aliResponse.RequestId,
 		Object:  "chat.completion.chunk",
@@ -163,11 +166,7 @@ func aliStreamHandler(c *gin.Context, resp *http.Response) (*OpenAIErrorWithStat
 		}
 		stopChan <- true
 	}()
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	setEventStreamHeaders(c)
 	lastResponseText := ""
 	c.Stream(func(w io.Writer) bool {
 		select {
@@ -178,9 +177,11 @@ func aliStreamHandler(c *gin.Context, resp *http.Response) (*OpenAIErrorWithStat
 				common.SysError("error unmarshalling stream response: " + err.Error())
 				return true
 			}
-			usage.PromptTokens += aliResponse.Usage.InputTokens
-			usage.CompletionTokens += aliResponse.Usage.OutputTokens
-			usage.TotalTokens += aliResponse.Usage.InputTokens + aliResponse.Usage.OutputTokens
+			if aliResponse.Usage.OutputTokens != 0 {
+				usage.PromptTokens = aliResponse.Usage.InputTokens
+				usage.CompletionTokens = aliResponse.Usage.OutputTokens
+				usage.TotalTokens = aliResponse.Usage.InputTokens + aliResponse.Usage.OutputTokens
+			}
 			response := streamResponseAli2OpenAI(&aliResponse)
 			response.Choices[0].Delta.Content = strings.TrimPrefix(response.Choices[0].Delta.Content, lastResponseText)
 			lastResponseText = aliResponse.Output.Text

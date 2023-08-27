@@ -75,7 +75,7 @@ type XunfeiChatResponse struct {
 	} `json:"payload"`
 }
 
-func requestOpenAI2Xunfei(request GeneralOpenAIRequest, xunfeiAppId string) *XunfeiChatRequest {
+func requestOpenAI2Xunfei(request GeneralOpenAIRequest, xunfeiAppId string, domain string) *XunfeiChatRequest {
 	messages := make([]XunfeiMessage, 0, len(request.Messages))
 	for _, message := range request.Messages {
 		if message.Role == "system" {
@@ -96,7 +96,7 @@ func requestOpenAI2Xunfei(request GeneralOpenAIRequest, xunfeiAppId string) *Xun
 	}
 	xunfeiRequest := XunfeiChatRequest{}
 	xunfeiRequest.Header.AppId = xunfeiAppId
-	xunfeiRequest.Parameter.Chat.Domain = "general"
+	xunfeiRequest.Parameter.Chat.Domain = domain
 	xunfeiRequest.Parameter.Chat.Temperature = request.Temperature
 	xunfeiRequest.Parameter.Chat.TopK = request.N
 	xunfeiRequest.Parameter.Chat.MaxTokens = request.MaxTokens
@@ -138,6 +138,9 @@ func streamResponseXunfei2OpenAI(xunfeiResponse *XunfeiChatResponse) *ChatComple
 	}
 	var choice ChatCompletionsStreamResponseChoice
 	choice.Delta.Content = xunfeiResponse.Payload.Choices.Text[0].Content
+	if xunfeiResponse.Payload.Choices.Status == 2 {
+		choice.FinishReason = &stopFinishReason
+	}
 	response := ChatCompletionsStreamResponse{
 		Object:  "chat.completion.chunk",
 		Created: common.GetTimestamp(),
@@ -175,15 +178,28 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 
 func xunfeiStreamHandler(c *gin.Context, textRequest GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*OpenAIErrorWithStatusCode, *Usage) {
 	var usage Usage
+	query := c.Request.URL.Query()
+	apiVersion := query.Get("api-version")
+	if apiVersion == "" {
+		apiVersion = c.GetString("api_version")
+	}
+	if apiVersion == "" {
+		apiVersion = "v1.1"
+		common.SysLog("api_version not found, use default: " + apiVersion)
+	}
+	domain := "general"
+	if apiVersion == "v2.1" {
+		domain = "generalv2"
+	}
+	hostUrl := fmt.Sprintf("wss://spark-api.xf-yun.com/%s/chat", apiVersion)
 	d := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
 	}
-	hostUrl := "wss://aichat.xf-yun.com/v1/chat"
 	conn, resp, err := d.Dial(buildXunfeiAuthUrl(hostUrl, apiKey, apiSecret), nil)
 	if err != nil || resp.StatusCode != 101 {
 		return errorWrapper(err, "dial_failed", http.StatusInternalServerError), nil
 	}
-	data := requestOpenAI2Xunfei(textRequest, appId)
+	data := requestOpenAI2Xunfei(textRequest, appId, domain)
 	err = conn.WriteJSON(data)
 	if err != nil {
 		return errorWrapper(err, "write_json_failed", http.StatusInternalServerError), nil
@@ -214,11 +230,7 @@ func xunfeiStreamHandler(c *gin.Context, textRequest GeneralOpenAIRequest, appId
 		}
 		stopChan <- true
 	}()
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	setEventStreamHeaders(c)
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case xunfeiResponse := <-dataChan:
